@@ -18,6 +18,7 @@ allowed_external_types = [
 default = ["dns", "_runtime-tokio", "protobuf"]
 protobuf = ["dep:protobuf"]
 prost = ["dep:prost"]
+unsafe-downcast = []
 dns = ["dep:hickory-resolver", "_runtime-tokio"]
 # The following feature is used to ensure all modules use the runtime
 # abstraction instead of using tokio directly.
@@ -61,6 +62,7 @@ tower = { version = "0.5.2", features = [
 tower-service = "0.3.3"
 trait-variant = "0.1.2"
 url = "2.5.0"
+send-future = "0.1"
 
 [dev-dependencies]
 async-stream = "0.3.6"
