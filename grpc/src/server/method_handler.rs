@@ -10,6 +10,9 @@ pub use server_streaming_adapter::ServerStreamingAdapter;
 
 mod unary_adapter;
 pub use unary_adapter::UnaryMethodAdapter;
+mod generic_byte_stream_method_handler;
+pub use crate::server::call::Incoming;
+pub use generic_byte_stream_method_handler::GenericByteStreamMethodHandler;
 
 mod message_stream_handler;
 pub use message_stream_handler::MessageStreamHandler;
