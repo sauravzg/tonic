@@ -22,3 +22,14 @@ pub use message_allocator::{
     HeapMessageAllocator, HeapMessageHolder, HeapRequestHolder, HeapResponseHolder,
     RpcMessageAllocator, RpcMessageHolder, RpcRequestHolder, RpcResponseHolder,
 };
+
+mod byte_stream_method_handler;
+pub use byte_stream_method_handler::{
+    ByteStreamMethodHandler, DynByteStreamMethodHandler, GenericByteStreamAdapter,
+};
+
+mod codec_message_stream_handler;
+pub use codec_message_stream_handler::CodecMessageStreamHandler;
+
+/// The default response body type produced by standard Codecs.
+pub type CodecRespB = bytes::Bytes;
