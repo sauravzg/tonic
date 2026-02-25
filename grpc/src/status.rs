@@ -55,6 +55,14 @@ impl Status {
     }
 }
 
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "status: {:?}, message: {:?}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for Status {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
