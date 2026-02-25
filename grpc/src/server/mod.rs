@@ -25,7 +25,6 @@
 use std::sync::Arc;
 
 use tokio::sync::oneshot;
-use tonic::async_trait;
 
 use crate::core::RecvMessage;
 use crate::core::RequestHeaders;
@@ -50,13 +49,57 @@ pub(crate) mod transport;
 pub(crate) mod router;
 pub mod service;
 
+mod builder;
+pub use builder::{RouterBuilder, ServerBuilder};
+
+use crate::server::router::Router;
+
+use transport::ServerTransport;
+
+use crate::Status;
+use std::future::Future;
+
+/// A gRPC server (V2).
+pub struct ServerV2<
+    T,
+    RespB,
+    F = crate::server::interceptor::NoopInterceptor,
+    BSF = crate::server::interceptor::NoopInterceptor,
+> where
+    T: ServerTransport,
+    RespB: bytes::Buf + Send + 'static,
+{
+    transport: T,
+    router: Router<T::ReqB, RespB, T::Writer<RespB>, T::Producer, F, BSF>,
+}
+
+impl<T, RespB, F, BSF> ServerV2<T, RespB, F, BSF>
+where
+    T: ServerTransport,
+    T::Writer<RespB>: crate::server::call::StreamingResponseWriter<RespB>,
+    RespB: bytes::Buf + Send + 'static,
+    F: crate::server::interceptor::InterceptorFactory,
+    BSF: crate::server::interceptor::ByteStreamInterceptorFactory,
+{
+    /// Serves the gRPC server.
+    pub fn serve<L>(self, listener: L) -> impl Future<Output = Result<(), Status>> + Send
+    where
+        L: crate::server::transport::listener::Listener + Send,
+        T::ReqB: bytes::Buf + Send + 'static,
+        T::Writer<RespB>: Send + 'static,
+        T::Producer: Send + Sync + 'static,
+    {
+        self.transport.serve(listener, self.router)
+    }
+}
+
 pub struct Server {
     handler: Option<Arc<dyn Service>>,
 }
 
 pub type Call = (String, Request, oneshot::Sender<Response>);
 
-#[async_trait]
+#[tonic::async_trait]
 pub trait Listener {
     async fn accept(&self) -> Option<Call>;
 }
