@@ -44,6 +44,7 @@ pub use codegen_api::{
 
 pub(crate) mod call;
 
+pub(crate) mod interceptor;
 pub(crate) mod method_handler;
 
 pub struct Server {
