@@ -46,6 +46,7 @@ pub(crate) mod call;
 
 pub(crate) mod interceptor;
 pub(crate) mod method_handler;
+pub(crate) mod transport;
 
 pub struct Server {
     handler: Option<Arc<dyn Service>>,
