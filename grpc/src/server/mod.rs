@@ -34,6 +34,7 @@ use crate::core::Trailers;
 use crate::rt::GrpcRuntime;
 
 pub mod interceptor;
+pub(crate) mod transport;
 
 pub struct Server {
     handler: Option<Arc<dyn DynHandle>>,
@@ -43,6 +44,8 @@ pub struct Server {
 
 mod sealed {
     pub trait Sealed {}
+    impl Sealed for crate::server::transport::hyper::HyperTransport {}
+    impl Sealed for crate::server::transport::hyper::HyperConnection {}
     impl Sealed for crate::inmemory::InMemoryListener {}
     impl Sealed for crate::inmemory::InMemoryServerCall {}
 }

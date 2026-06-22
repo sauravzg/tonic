@@ -29,6 +29,8 @@ use crate::server::Handle;
 use crate::server::RecvStream;
 use crate::server::SendStream;
 
+pub mod http2_framing;
+
 /// A trait which allows intercepting an incoming RPC call to a [`Handle`] implementation.
 #[trait_variant::make(Send)]
 pub trait Intercept: Sync + 'static {
@@ -88,6 +90,95 @@ pub trait HandleExt: Handle + Sized {
 }
 
 impl<T: Handle + Sized> HandleExt for T {}
+
+/// A no-op interceptor that simply delegates to the next handler.
+///
+/// This is the default interceptor used by [`RouterBuilder`](crate::server::RouterBuilder)
+/// when no interceptor has been added.
+#[derive(Clone, Copy)]
+pub struct Identity;
+
+impl Intercept for Identity {
+    async fn intercept(
+        &self,
+        headers: RequestHeaders,
+        options: CallOptions,
+        tx: &mut impl SendStream,
+        rx: impl RecvStream + 'static,
+        next: &impl Handle,
+    ) -> Trailers {
+        next.handle(headers, options, tx, rx).await
+    }
+}
+
+/// Chains two interceptors where `first` runs before `second`.
+///
+/// When a call is intercepted, `first` runs (outermost), and its "next" is
+/// an [`Intercepted`] wrapper around the actual handler with `second`. This
+/// means execution flows: `first` → `second` → handler.
+#[derive(Clone)]
+pub struct ComposedIntercept<A, B> {
+    first: A,
+    second: B,
+}
+
+impl<A, B> ComposedIntercept<A, B> {
+    /// Creates a new composed interceptor where `first` runs before `second`.
+    pub fn new(first: A, second: B) -> Self {
+        Self { first, second }
+    }
+}
+
+impl<A, B> Intercept for ComposedIntercept<A, B>
+where
+    A: Intercept,
+    B: Intercept,
+{
+    async fn intercept(
+        &self,
+        headers: RequestHeaders,
+        options: CallOptions,
+        tx: &mut impl SendStream,
+        rx: impl RecvStream + 'static,
+        next: &impl Handle,
+    ) -> Trailers {
+        // We need a `Handle` that, when called, runs `second` then `next`.
+        // We can't use `Intercepted` directly because it needs owned values
+        // and we only have borrows here. Instead, build a small wrapper.
+        let inner = SecondThenNext {
+            second: &self.second,
+            next,
+        };
+        self.first.intercept(headers, options, tx, rx, &inner).await
+    }
+}
+
+/// A temporary Handle adapter used inside [`ComposedIntercept`].
+///
+/// When called, it runs `second.intercept(...)` with `next` as the
+/// downstream handler, achieving the composed chain.
+struct SecondThenNext<'a, B, N: ?Sized> {
+    second: &'a B,
+    next: &'a N,
+}
+
+impl<B, N> Handle for SecondThenNext<'_, B, N>
+where
+    B: Intercept,
+    N: Handle,
+{
+    async fn handle(
+        &self,
+        headers: RequestHeaders,
+        options: CallOptions,
+        tx: &mut impl SendStream,
+        rx: impl RecvStream + 'static,
+    ) -> Trailers {
+        self.second
+            .intercept(headers, options, tx, rx, self.next)
+            .await
+    }
+}
 
 #[cfg(test)]
 mod test {

@@ -39,6 +39,7 @@ pub mod inmemory;
 pub mod metadata;
 pub mod server;
 
+pub(crate) mod codec;
 mod macros;
 mod status;
 
