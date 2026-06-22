@@ -72,18 +72,14 @@ use crate::credentials::client::ClientConnectionSecurityInfo;
 use crate::credentials::client::DynClientConnectionSecurityInfo;
 use crate::credentials::common::Authority;
 use crate::rt::GrpcRuntime;
-use crate::server::Call as ServerCall;
-use crate::server::Listener as ServerListener;
-use crate::server::RecvStream as ServerRecvStream;
-use crate::server::SendOptions as ServerSendOptions;
-use crate::server::SendStream as ServerSendStream;
+use crate::server::{BoxedRecvStream, DynHandle, Listener, RecvStream as ServerRecvStream, SendOptions as ServerSendOptions, SendStream as ServerSendStream, Transport as ServerTransport};
 
 static LISTENERS: LazyLock<Mutex<HashMap<String, mpsc::Sender<InMemoryServerCall>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
-struct InMemoryServerCall {
+pub struct InMemoryServerCall {
     headers: RequestHeaders,
     req_rx: mpsc::UnboundedReceiver<InMemoryRequestStreamItem>,
     resp_tx: mpsc::UnboundedSender<InMemoryResponseStreamItem>,
@@ -167,26 +163,42 @@ impl InMemoryListener {
     pub async fn await_connection(&self) {}
 }
 
-impl ServerListener for InMemoryListener {
-    type SendStream = InMemoryServerSendStream;
-    type RecvStream = InMemoryServerRecvStream;
+impl Listener for InMemoryListener {
+    type Transport = InMemoryServerCall;
 
-    async fn accept(&self) -> Option<ServerCall<Self::SendStream, Self::RecvStream>> {
+    async fn accept(&self) -> Option<Self::Transport> {
         let mut r = self.inner.r.lock().await;
         tokio::select! {
             call = r.recv() => {
-                let call = call?;
-                Some(ServerCall {
-                    headers: call.headers,
-                    send: InMemoryServerSendStream { tx: call.resp_tx },
-                    recv: InMemoryServerRecvStream { rx: call.req_rx },
-                    trailers_tx: call.trailer_tx,
-                })
+                call
             }
             _ = self.inner.close_notify.notified() => {
                 None
             }
         }
+    }
+
+    fn local_addr(&self) -> Result<std::net::SocketAddr, String> {
+        Err("in-memory listener has no socket address".to_string())
+    }
+}
+
+impl ServerTransport for InMemoryServerCall {
+    async fn serve(
+        self,
+        handler: Arc<dyn DynHandle>,
+        runtime: GrpcRuntime,
+        _shutdown: Option<tokio::sync::watch::Receiver<()>>,
+    ) {
+        let mut send = InMemoryServerSendStream { tx: self.resp_tx };
+        let recv = BoxedRecvStream(Box::new(InMemoryServerRecvStream { rx: self.req_rx }));
+        let options = crate::client::CallOptions::default();
+        let trailers_tx = self.trailer_tx;
+
+        runtime.spawn(Box::pin(async move {
+            let trailers = handler.dyn_handle(self.headers, options, &mut send, recv).await;
+            let _ = trailers_tx.send(trailers);
+        }));
     }
 }
 
@@ -492,5 +504,24 @@ mod tests {
             }
             _ => panic!("expected trailers with error, got {:?}", item),
         }
+    }
+
+    #[test]
+    fn in_memory_listener_local_addr_returns_error() {
+        use crate::server::Listener;
+        let listener = InMemoryListener::new();
+        let result = listener.local_addr();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("no socket address"),
+            "error message should mention no socket address"
+        );
+    }
+
+    #[test]
+    fn in_memory_listener_id_is_unique() {
+        let a = InMemoryListener::new();
+        let b = InMemoryListener::new();
+        assert_ne!(a.id(), b.id());
     }
 }

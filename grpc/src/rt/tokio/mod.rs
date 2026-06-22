@@ -156,6 +156,44 @@ impl Runtime for TokioRuntime {
             Ok(stream)
         })
     }
+
+    fn tcp_listener(
+        &self,
+        addr: SocketAddr,
+    ) -> BoxFuture<Result<Box<dyn super::EndpointListener>, String>> {
+        Box::pin(async move {
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Box::new(TokioTcpListener { listener })
+                as Box<dyn super::EndpointListener>)
+        })
+    }
+
+    #[cfg(unix)]
+    fn unix_listener(
+        &self,
+        path: std::path::PathBuf,
+        _opts: super::UnixSocketOptions,
+    ) -> BoxFuture<Result<Box<dyn super::EndpointListener>, String>> {
+        Box::pin(async move {
+            let listener = tokio::net::UnixListener::bind(&path)
+                .map_err(|e| e.to_string())?;
+            Ok(Box::new(TokioUnixListener { listener })
+                as Box<dyn super::EndpointListener>)
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn unix_listener(
+        &self,
+        _path: std::path::PathBuf,
+        _opts: super::UnixSocketOptions,
+    ) -> BoxFuture<Result<Box<dyn super::EndpointListener>, String>> {
+        Box::pin(async move {
+            Err("Unix listeners are not supported on this platform".to_string())
+        })
+    }
 }
 
 impl TokioDefaultDnsResolver {
@@ -251,6 +289,68 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> super::GrpcEndpoint for
         _token: private::Internal,
     ) -> std::task::Poll<Result<(), std::io::Error>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TokioTcpListener — EndpointListener for TCP
+// ---------------------------------------------------------------------------
+
+/// Wraps `tokio::net::TcpListener` as an [`EndpointListener`](super::EndpointListener).
+struct TokioTcpListener {
+    listener: tokio::net::TcpListener,
+}
+
+#[tonic::async_trait]
+impl super::EndpointListener for TokioTcpListener {
+    async fn accept(&self) -> Result<Box<dyn super::GrpcEndpoint>, String> {
+        let (stream, _addr) = self.listener
+            .accept()
+            .await
+            .map_err(|e| e.to_string())?;
+        let io = TokioIoStream::new_from_tcp(stream)?;
+        Ok(Box::new(io))
+    }
+
+    fn local_addr(&self) -> Result<std::net::SocketAddr, String> {
+        self.listener.local_addr().map_err(|e| e.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TokioUnixListener — EndpointListener for Unix sockets
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+struct TokioUnixListener {
+    listener: tokio::net::UnixListener,
+}
+
+#[cfg(unix)]
+#[tonic::async_trait]
+impl super::EndpointListener for TokioUnixListener {
+    async fn accept(&self) -> Result<Box<dyn super::GrpcEndpoint>, String> {
+        use crate::client::name_resolution::UNIX_NETWORK_TYPE;
+
+        let (stream, _addr) = self.listener
+            .accept()
+            .await
+            .map_err(|e| e.to_string())?;
+        let peer_addr = stream.peer_addr().map_err(|e| e.to_string())?;
+        let local_addr = stream.local_addr().map_err(|e| e.to_string())?;
+
+        let io: Box<dyn super::GrpcEndpoint> = Box::new(TokioIoStream {
+            peer_addr: format!("{peer_addr:?}").into_boxed_str(),
+            local_addr: format!("{local_addr:?}").into_boxed_str(),
+            network_type: UNIX_NETWORK_TYPE,
+            inner: stream,
+        });
+        Ok(io)
+    }
+
+    fn local_addr(&self) -> Result<std::net::SocketAddr, String> {
+        // Unix sockets don't have a SocketAddr. Return an error.
+        Err("Unix listeners do not have a SocketAddr".to_string())
     }
 }
 

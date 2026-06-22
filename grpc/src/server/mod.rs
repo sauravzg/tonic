@@ -22,6 +22,7 @@
  *
  */
 
+use std::future::Future;
 use std::sync::Arc;
 use tonic::async_trait;
 
@@ -30,33 +31,68 @@ use crate::core::RecvMessage;
 use crate::core::RequestHeaders;
 use crate::core::ServerResponseStreamItem;
 use crate::core::Trailers;
-use tokio::sync::oneshot;
+use crate::rt::GrpcRuntime;
 
-pub(crate) mod interceptor;
+pub mod interceptor;
 
 pub struct Server {
     handler: Option<Arc<dyn DynHandle>>,
+    runtime: GrpcRuntime,
+    // Future: shutdown_signal, max_connection_age, etc.
 }
 
-pub struct Call<SS, RS> {
-    pub headers: RequestHeaders,
-    pub send: SS,
-    pub recv: RS,
-    pub trailers_tx: oneshot::Sender<Trailers>,
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for crate::inmemory::InMemoryListener {}
+    impl Sealed for crate::inmemory::InMemoryServerCall {}
 }
 
+/// A bound listening socket that yields incoming connections.
+///
+/// **Sealed** — external crates cannot implement this trait.
 #[trait_variant::make(Send)]
-pub trait Listener {
-    type SendStream: SendStream + 'static;
-    type RecvStream: RecvStream + 'static;
-    async fn accept(&self) -> Option<Call<Self::SendStream, Self::RecvStream>>;
+pub trait Listener: sealed::Sealed {
+    /// The concrete transport type yielded by this listener.
+    type Transport: Transport + 'static;
+
+    /// Accepts the next incoming connection.
+    async fn accept(&self) -> Option<Self::Transport>;
+
+    /// Returns the local address this listener is bound to.
+    ///
+    /// Returns `Err` if the underlying transport does not use IP/port addresses
+    /// (e.g., Unix domain sockets or In-Memory transport).
+    fn local_addr(&self) -> Result<std::net::SocketAddr, String>;
+}
+
+/// A connection accepted by a [`Listener`] that can serve RPCs.
+///
+/// **Sealed** — external crates cannot implement this trait.
+#[trait_variant::make(Send)]
+pub trait Transport: sealed::Sealed {
+    /// Wires the connection to the application handler and drives the execution.
+    ///
+    /// If `shutdown` is provided and its value changes, the connection should
+    /// initiate graceful shutdown (e.g., send HTTP/2 GOAWAY) and finish
+    /// processing in-flight RPCs before returning.
+    async fn serve(
+        self,
+        handler: Arc<dyn DynHandle>,
+        runtime: GrpcRuntime,
+        shutdown: Option<tokio::sync::watch::Receiver<()>>,
+    );
 }
 
 impl Server {
+    /// Creates a new server with no handler.
     pub fn new() -> Self {
-        Self { handler: None }
+        Self {
+            handler: None,
+            runtime: crate::rt::default_runtime(),
+        }
     }
 
+    /// Sets the RPC handler for this server.
     pub fn set_handler<H>(&mut self, h: H)
     where
         H: Handle + Send + Sync + 'static,
@@ -64,20 +100,81 @@ impl Server {
         self.handler = Some(Arc::new(h))
     }
 
-    pub async fn serve(&self, l: &impl Listener) {
-        while let Some(call) = l.accept().await {
-            let mut send: Box<dyn DynSendStream> = Box::new(call.send);
-            let recv = BoxedRecvStream(Box::new(call.recv));
-            let options = CallOptions::default();
-            let trailers_tx = call.trailers_tx;
-            let trailers = self
-                .handler
-                .as_ref()
-                .unwrap()
-                .dyn_handle(call.headers, options, &mut *send, recv)
-                .await;
-            let _ = trailers_tx.send(trailers);
+    /// Serves on the given listener until it stops producing connections.
+    ///
+    /// After the accept loop ends, waits for all in-flight connections to
+    /// drain before returning. Connections are not notified to shut down
+    /// gracefully; they run until completion or client disconnect.
+    pub async fn serve(&self, listener: &impl Listener) {
+        let (drain_tx, drain_rx) = tokio::sync::watch::channel(());
+
+        while let Some(connection) = listener.accept().await {
+            let handler = match self.handler.as_ref() {
+                Some(h) => h.clone(),
+                None => continue,
+            };
+            let rx = drain_rx.clone();
+            let rt = self.runtime.clone();
+            self.runtime.spawn(Box::pin(async move {
+                connection.serve(handler, rt, None).await;
+                drop(rx);
+            }));
         }
+
+        drop(drain_rx);
+        drain_tx.closed().await;
+    }
+
+    /// Serves on the given listener until `signal` resolves, then drains
+    /// all in-flight connections before returning.
+    ///
+    /// When `signal` completes:
+    /// 1. The server stops accepting new connections.
+    /// 2. All open HTTP/2 connections receive a GOAWAY frame.
+    /// 3. In-flight RPCs continue to completion.
+    /// 4. This method returns once all connections are closed.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// server.serve_with_shutdown(&listener, async {
+    ///     tokio::signal::ctrl_c().await.ok();
+    /// }).await;
+    /// ```
+    pub async fn serve_with_shutdown(
+        &self,
+        listener: &impl Listener,
+        signal: impl Future<Output = ()>,
+    ) {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+
+        tokio::pin!(signal);
+
+        loop {
+            tokio::select! {
+                conn = listener.accept() => {
+                    let Some(connection) = conn else { break };
+                    let handler = match self.handler.as_ref() {
+                        Some(h) => h.clone(),
+                        None => continue,
+                    };
+                    let rx = shutdown_rx.clone();
+                    let rt = self.runtime.clone();
+                    self.runtime.spawn(Box::pin(async move {
+                        connection.serve(handler, rt, Some(rx)).await;
+                    }));
+                }
+                _ = &mut signal => {
+                    // Broadcast shutdown to all connections.
+                    let _ = shutdown_tx.send(());
+                    break;
+                }
+            }
+        }
+
+        // Wait for all connections to drain.
+        drop(shutdown_rx);
+        shutdown_tx.closed().await;
     }
 }
 
@@ -104,7 +201,7 @@ pub trait Handle: Send + Sync {
 }
 
 #[async_trait]
-trait DynHandle: Send + Sync {
+pub trait DynHandle: Send + Sync {
     async fn dyn_handle(
         &self,
         headers: RequestHeaders,
@@ -138,12 +235,30 @@ impl<T: Handle> DynHandle for T {
 //     |
 //     = note: `Box<(dyn server::DynRecvStream + '0)>` must implement `server::RecvStream`, for any lifetime `'0`...
 //     = note: ...but `server::RecvStream` is actually implemented for the type `Box<(dyn server::DynRecvStream + 'static)>`
-struct BoxedRecvStream(Box<dyn DynRecvStream + 'static>);
+pub struct BoxedRecvStream(pub Box<dyn DynRecvStream + 'static>);
 
 // Implement RecvStream for the wrapper instead of the Box directly
 impl RecvStream for BoxedRecvStream {
     async fn next(&mut self, msg: &mut dyn RecvMessage) -> Option<Result<(), ()>> {
         self.0.dyn_next(msg).await
+    }
+}
+
+/// Bridges [`DynHandle`] (object-safe) back to [`Handle`] (generic),
+/// enabling interceptor composition on top of a dynamic handler.
+pub(crate) struct DynHandleWrapper(pub Arc<dyn DynHandle>);
+
+impl Handle for DynHandleWrapper {
+    async fn handle(
+        &self,
+        headers: RequestHeaders,
+        options: CallOptions,
+        tx: &mut impl SendStream,
+        rx: impl RecvStream + 'static,
+    ) -> Trailers {
+        self.0
+            .dyn_handle(headers, options, tx, BoxedRecvStream(Box::new(rx)))
+            .await
     }
 }
 
@@ -169,7 +284,7 @@ pub trait SendStream {
 }
 
 #[async_trait]
-trait DynSendStream: Send {
+pub trait DynSendStream: Send {
     async fn dyn_send<'a>(
         &mut self,
         item: ServerResponseStreamItem<'a>,
@@ -238,7 +353,7 @@ pub trait RecvStream {
 }
 
 #[async_trait]
-trait DynRecvStream: Send {
+pub trait DynRecvStream: Send {
     async fn dyn_next(&mut self, msg: &mut dyn RecvMessage) -> Option<Result<(), ()>>;
 }
 
