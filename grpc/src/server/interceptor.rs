@@ -29,6 +29,7 @@ use crate::server::Handle;
 use crate::server::RecvStream;
 use crate::server::SendStream;
 
+pub mod deadline;
 pub mod http2_framing;
 
 /// A trait which allows intercepting an incoming RPC call to a [`Handle`] implementation.
