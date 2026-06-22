@@ -33,7 +33,11 @@ use crate::core::ServerResponseStreamItem;
 use crate::core::Trailers;
 use crate::rt::GrpcRuntime;
 
+pub mod builder;
+pub mod descriptor;
 pub mod interceptor;
+pub(crate) mod router;
+pub mod service;
 pub(crate) mod transport;
 
 pub struct Server {
@@ -87,7 +91,44 @@ pub trait Transport: sealed::Sealed {
 }
 
 impl Server {
+    /// Creates a [`ServerBuilder`](builder::ServerBuilder) with no interceptors.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let server = Server::builder()
+    ///     .add_service(greeter_service)
+    ///     .build();
+    /// ```
+    pub fn builder() -> builder::ServerBuilder {
+        builder::ServerBuilder::new()
+    }
+
+    /// Creates a [`ServerBuilder`](builder::ServerBuilder) with the given
+    /// interceptor chain.
+    ///
+    /// All services registered through the builder will have their method
+    /// handlers wrapped with `interceptor` before type erasure.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use grpc::server::interceptor::ComposedIntercept;
+    /// let chain = ComposedIntercept::new(logging, auth);
+    /// let server = Server::builder_with(chain)
+    ///     .add_service(greeter_service)
+    ///     .build();
+    /// ```
+    pub fn builder_with<I: interceptor::Intercept + Clone + Send + Sync + 'static>(
+        interceptor: I,
+    ) -> builder::ServerBuilder<I> {
+        builder::ServerBuilder::new_with_interceptor(interceptor)
+    }
+
     /// Creates a new server with no handler.
+    ///
+    /// For most use cases, prefer [`Server::builder()`] which provides
+    /// a fluent API with interceptor support.
     pub fn new() -> Self {
         Self {
             handler: None,
@@ -96,6 +137,9 @@ impl Server {
     }
 
     /// Sets the RPC handler for this server.
+    ///
+    /// For most use cases, prefer [`Server::builder()`] which handles
+    /// handler registration via [`add_service()`](builder::ServerBuilder::add_service).
     pub fn set_handler<H>(&mut self, h: H)
     where
         H: Handle + Send + Sync + 'static,
