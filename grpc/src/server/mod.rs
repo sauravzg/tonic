@@ -38,7 +38,7 @@ pub mod descriptor;
 pub mod interceptor;
 pub(crate) mod router;
 pub mod service;
-pub(crate) mod transport;
+pub mod transport;
 
 pub struct Server {
     handler: Option<Arc<dyn DynHandle>>,

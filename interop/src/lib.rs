@@ -3,6 +3,7 @@
 pub mod client;
 pub mod client_prost;
 pub mod client_protobuf;
+pub mod server_grpc;
 pub mod server_prost;
 pub mod server_protobuf;
 

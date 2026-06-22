@@ -50,7 +50,7 @@ pub use status::StatusError;
 pub use status::StatusOr;
 
 mod byte_str;
-mod rt;
+pub mod rt;
 mod send_future;
 
 mod private {

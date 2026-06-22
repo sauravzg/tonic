@@ -13,6 +13,7 @@ struct Opts {
 enum Codec {
     Prost,
     Protobuf,
+    Grpc,
 }
 
 impl FromStr for Codec {
@@ -22,6 +23,7 @@ impl FromStr for Codec {
         match s {
             "prost" => Ok(Codec::Prost),
             "protobuf" => Ok(Codec::Protobuf),
+            "grpc" => Ok(Codec::Grpc),
             _ => Err(format!("Invalid codec: {}", s)),
         }
     }
@@ -44,6 +46,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let matches = Opts::parse()?;
 
     let addr = "127.0.0.1:10000".parse().unwrap();
+
+    // The Grpc codec uses grpc::server::Server directly, not tonic.
+    if let Codec::Grpc = matches.codec {
+        interop::server_grpc::run_server(addr).await?;
+        return Ok(());
+    }
 
     let mut builder = Server::builder();
 
@@ -88,6 +96,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 .serve(addr)
                 .await?;
         }
+        Codec::Grpc => unreachable!("handled above"),
     };
 
     Ok(())
