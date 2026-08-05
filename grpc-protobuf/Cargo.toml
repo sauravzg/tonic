@@ -21,6 +21,7 @@ allowed_external_types = [
 [features]
 
 [dependencies]
+async-trait = "0.1.91"
 bytes = "1.11.1"
 grpc = { version = "0.10.0", path = "../grpc" }
 protobuf = "4.35.1-release"

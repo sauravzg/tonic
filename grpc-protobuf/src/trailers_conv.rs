@@ -22,7 +22,12 @@
  *
  */
 
-use grpc::client::Trailers;
+// `#2792` forked `Trailers` into distinct client and server types with
+// identical APIs. `status_from_trailers` parses trailers *received from* a
+// server (client side); `trailers_from_status` produces trailers to *send to* a
+// client (server side).
+use grpc::client::Trailers as ClientTrailers;
+use grpc::server_internal::Trailers as ServerTrailers;
 use protobuf::Parse;
 use protobuf::Serialize;
 use protobuf_well_known_types::Any;
@@ -39,7 +44,7 @@ mod google_rpc {
 
 /// Converts grpc-status-details-bin from the trailer's metadata. If the rpc status code doesn't
 /// match the result, the status will become an INTERNAL error.
-pub(crate) fn status_from_trailers(mut t: Trailers) -> Status {
+pub(crate) fn status_from_trailers(mut t: ClientTrailers) -> Status {
     let bin_val = t.metadata_mut().remove_bin("grpc-status-details-bin");
     match t.into_status() {
         Ok(()) => {
@@ -101,10 +106,9 @@ fn parse_rpc_status(buf: &[u8]) -> StatusOr<StatusError> {
 }
 
 /// Converts the status to trailers and inserts grpc-status-details-bin into the metadata.
-#[allow(dead_code)]
-pub(crate) fn trailers_from_status(s: Status) -> Trailers {
+pub(crate) fn trailers_from_status(s: Status) -> ServerTrailers {
     match s {
-        Ok(()) => Trailers::new(Ok(())),
+        Ok(()) => ServerTrailers::new(Ok(())),
         Err(status_err) => {
             let has_payloads = status_err.has_payloads();
             let (code, message, payloads) = status_err.into_parts();
@@ -113,7 +117,7 @@ pub(crate) fn trailers_from_status(s: Status) -> Trailers {
                 let code_i32 = code as i32;
                 let bytes = match encode_rpc_status(code_i32, &message, payloads) {
                     Ok(bytes) => bytes,
-                    Err(err) => return Trailers::new(Err(err)),
+                    Err(err) => return ServerTrailers::new(Err(err)),
                 };
                 m.insert_bin(
                     "grpc-status-details-bin",
@@ -123,7 +127,7 @@ pub(crate) fn trailers_from_status(s: Status) -> Trailers {
                 );
             }
             let grpc_code = grpc::StatusCodeError::from(code as i32);
-            Trailers::new(Err(grpc::StatusError::new(grpc_code, message))).with_metadata(m)
+            ServerTrailers::new(Err(grpc::StatusError::new(grpc_code, message))).with_metadata(m)
         }
     }
 }
@@ -160,6 +164,14 @@ fn encode_rpc_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Simulates a wire round-trip: server-produced trailers arriving at a
+    /// client. `#2792` made these distinct types with no `From` impl, so this
+    /// moves the status + metadata across the boundary by hand.
+    fn across_wire(server: ServerTrailers) -> ClientTrailers {
+        let metadata = server.metadata().clone();
+        ClientTrailers::new(server.into_status()).with_metadata(metadata)
+    }
 
     #[test]
     fn test_trailers_from_status_details_copied_to_grpc_status() {
@@ -214,7 +226,7 @@ mod tests {
         og_err.set_payload(b"type.googleapis.com/foo", b"hello");
         og_err.set_payload(b"type.googleapis.com/bar", b"world");
 
-        let trailers = trailers_from_status(Err(og_err.clone()));
+        let trailers = across_wire(trailers_from_status(Err(og_err.clone())));
         let rt_err = status_from_trailers(trailers).unwrap_err();
         assert_eq!(rt_err.code(), og_err.code());
         assert_eq!(rt_err.message(), og_err.message());
@@ -235,7 +247,7 @@ mod tests {
         og_err.set_payload(b"type.googleapis.com/bar\x80", b"ain't gonna work");
         og_err.set_payload(b"type.googleapis.com/bar", b"hello");
 
-        let trailers = trailers_from_status(Err(og_err.clone()));
+        let trailers = across_wire(trailers_from_status(Err(og_err.clone())));
         let rt_err = status_from_trailers(trailers).unwrap_err();
         assert_eq!(rt_err.code(), og_err.code());
         assert_eq!(rt_err.message(), og_err.message());
@@ -256,7 +268,7 @@ mod tests {
     fn test_roundtrip_no_payload() {
         let og_err = StatusError::new(StatusCodeError::NotFound, "not found detail");
 
-        let trailers = trailers_from_status(Err(og_err.clone()));
+        let trailers = across_wire(trailers_from_status(Err(og_err.clone())));
         let rt_err = status_from_trailers(trailers).unwrap_err();
         assert_eq!(rt_err.code(), og_err.code());
         assert_eq!(rt_err.message(), og_err.message());
@@ -265,14 +277,14 @@ mod tests {
 
     #[test]
     fn test_roundtrip_ok() {
-        let trailers = trailers_from_status(Ok(()));
+        let trailers = across_wire(trailers_from_status(Ok(())));
         let status = status_from_trailers(trailers);
         assert!(status.is_ok());
     }
 
     #[test]
     fn test_status_from_trailers_ok() {
-        let trailers = Trailers::new(Ok(()));
+        let trailers = ClientTrailers::new(Ok(()));
 
         let status = status_from_trailers(trailers);
         assert!(status.is_ok());
@@ -280,7 +292,7 @@ mod tests {
 
     #[test]
     fn test_status_from_trailers_no_details_bin() {
-        let trailers = Trailers::new(Err(grpc::StatusError::new(
+        let trailers = ClientTrailers::new(Err(grpc::StatusError::new(
             grpc::StatusCodeError::NotFound,
             "Resource missing gRPC status",
         )));
@@ -307,7 +319,7 @@ mod tests {
                 .try_into()
                 .expect("Bytes to metadata value cannot fail"),
         );
-        let trailers = Trailers::new(Err(grpc::StatusError::new(
+        let trailers = ClientTrailers::new(Err(grpc::StatusError::new(
             grpc::StatusCodeError::NotFound,
             "Resource missing gRPC status",
         )))
@@ -338,7 +350,7 @@ mod tests {
                 .try_into()
                 .expect("Bytes to metadata value cannot fail"),
         );
-        let trailers = Trailers::new(Err(grpc::StatusError::new(
+        let trailers = ClientTrailers::new(Err(grpc::StatusError::new(
             grpc::StatusCodeError::PermissionDenied,
             "Permission denied gRPC status",
         )))
@@ -363,7 +375,7 @@ mod tests {
                 .try_into()
                 .expect("Bytes to metadata value cannot fail"),
         );
-        let trailers = Trailers::new(Err(grpc::StatusError::new(
+        let trailers = ClientTrailers::new(Err(grpc::StatusError::new(
             grpc::StatusCodeError::PermissionDenied,
             "Permission denied gRPC status",
         )))
@@ -393,7 +405,7 @@ mod tests {
                 .try_into()
                 .expect("Bytes to metadata value cannot fail"),
         );
-        let trailers = Trailers::new(Ok(())).with_metadata(m);
+        let trailers = ClientTrailers::new(Ok(())).with_metadata(m);
 
         let err = status_from_trailers(trailers).unwrap_err();
         assert_eq!(err.code(), StatusCodeError::Internal);
@@ -412,7 +424,7 @@ mod tests {
                 .try_into()
                 .expect("Bytes to metadata value cannot fail"),
         );
-        let trailers = Trailers::new(Err(grpc::StatusError::new(
+        let trailers = ClientTrailers::new(Err(grpc::StatusError::new(
             grpc::StatusCodeError::PermissionDenied,
             "Permission denied gRPC status",
         )))
