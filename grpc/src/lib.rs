@@ -68,6 +68,24 @@ pub use status::Result;
 pub use status::StatusCodeError;
 pub use status::StatusError;
 
+/// Internal plumbing shared with the `grpc-protobuf` integration crate.
+///
+/// This is **not** a stable public API: it is hidden from documentation and may
+/// change without notice. It exists so that `grpc-protobuf` can implement the
+/// server-side traits (`Handle`, `Service`, streams, descriptors) without making
+/// the entire `server` module public. End users should not depend on this module.
+#[doc(hidden)]
+pub mod server_internal {
+    pub use crate::server::service::Service;
+    pub use crate::server::{
+        BoxedRecvStream, DynHandle, DynRecvStream, DynSendStream, Handle, RecvStream,
+        RequestHeaders, ResponseStreamItem, SendOptions, SendStream, Trailers,
+    };
+    pub mod descriptor {
+        pub use crate::server::descriptor::{MethodDescriptor, MethodType, ServiceDescriptor};
+    }
+}
+
 #[cfg(feature = "__unstable")]
 #[doc(hidden)]
 pub mod __unstable {
